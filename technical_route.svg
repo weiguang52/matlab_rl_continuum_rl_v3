@@ -1,0 +1,84 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760">
+  <defs>
+    <style>
+      .title { font: 700 32px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #172033; }
+      .subtitle { font: 18px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #4d5b73; }
+      .box-title { font: 700 20px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #172033; }
+      .box-text { font: 15px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #46546a; }
+      .small { font: 13px "Microsoft YaHei", "Noto Sans CJK SC", Arial, sans-serif; fill: #59677d; }
+      .box { fill: #ffffff; stroke: #b8c4d6; stroke-width: 1.5; rx: 10; }
+      .blue { fill: #e8f1ff; stroke: #6394dc; }
+      .green { fill: #e9f8ef; stroke: #61a979; }
+      .amber { fill: #fff4df; stroke: #c99a38; }
+      .red { fill: #fff0ee; stroke: #d16b5c; }
+      .purple { fill: #f1edff; stroke: #8a78d6; }
+      .line { fill: none; stroke: #59677d; stroke-width: 2; marker-end: url(#arrow); }
+      .dash { fill: none; stroke: #7b8799; stroke-width: 2; stroke-dasharray: 7 7; marker-end: url(#arrow); }
+    </style>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,6 L9,3 z" fill="#59677d"/>
+    </marker>
+  </defs>
+
+  <rect width="1280" height="760" fill="#f7f9fc"/>
+  <text x="60" y="58" class="title">双层 RL 连续体机械臂运动规划技术路线</text>
+  <text x="60" y="88" class="subtitle">工程数据解析 → 场景建模 → 离线可达性 LUT → 上层入口规划 → 下层连续控制 → 联合评估与可视化</text>
+
+  <rect x="60" y="135" width="200" height="132" class="box blue"/>
+  <text x="86" y="170" class="box-title">数据输入</text>
+  <text x="86" y="202" class="box-text">SupportInfo</text>
+  <text x="86" y="226" class="box-text">ExplorationInfo</text>
+  <text x="86" y="250" class="small">四层：CSP / LGP / SGP / BP</text>
+
+  <rect x="315" y="135" width="230" height="132" class="box green"/>
+  <text x="342" y="170" class="box-title">环境建模</text>
+  <text x="342" y="202" class="box-text">层间 zRange / 目标区域</text>
+  <text x="342" y="226" class="box-text">支撑柱 / 入口孔 / 网格</text>
+  <text x="342" y="250" class="small">build_scene_model</text>
+
+  <rect x="600" y="135" width="250" height="132" class="box amber"/>
+  <text x="627" y="170" class="box-title">运动学与碰撞</text>
+  <text x="627" y="202" class="box-text">常曲率 FK：centerline, tip</text>
+  <text x="627" y="226" class="box-text">中心线-支撑柱碰撞检查</text>
+  <text x="627" y="250" class="small">q = [zProbe, alpha1, theta1, gamma, theta2, alpha3]</text>
+
+  <rect x="905" y="135" width="255" height="132" class="box purple"/>
+  <text x="932" y="170" class="box-title">Reach LUT</text>
+  <text x="932" y="202" class="box-text">每入口蒙特卡洛采样</text>
+  <text x="932" y="226" class="box-text">过滤 z / 碰撞 / XY 网格化</text>
+  <text x="932" y="250" class="small">reach.query(layer, entry, targetXY)</text>
+
+  <path d="M260 201 H315" class="line"/>
+  <path d="M545 201 H600" class="line"/>
+  <path d="M850 201 H905" class="line"/>
+
+  <rect x="145" y="372" width="285" height="150" class="box red"/>
+  <text x="172" y="407" class="box-title">上层 Double DQN</text>
+  <text x="172" y="439" class="box-text">状态：目标集摘要 + 已用资源</text>
+  <text x="172" y="463" class="box-text">动作：选择 AnchorPoint + 下探孔</text>
+  <text x="172" y="487" class="box-text">目标：最少定位点，其次最少下探孔</text>
+  <text x="172" y="511" class="small">train_upper_dqn</text>
+
+  <rect x="505" y="372" width="285" height="150" class="box blue"/>
+  <text x="532" y="407" class="box-title">下层通用 SAC</text>
+  <text x="532" y="439" class="box-text">观测：误差 / q / 障碍 / 入口 / 深度</text>
+  <text x="532" y="463" class="box-text">动作：连续增量 Δq</text>
+  <text x="532" y="487" class="box-text">奖励：靠近目标、净空、平滑、成功</text>
+  <text x="532" y="511" class="small">train_lower_sac_universal</text>
+
+  <rect x="865" y="372" width="285" height="150" class="box green"/>
+  <text x="892" y="407" class="box-title">联合评估与可视化</text>
+  <text x="892" y="439" class="box-text">上层序贯选入口</text>
+  <text x="892" y="463" class="box-text">下层 rollout 到目标</text>
+  <text x="892" y="487" class="box-text">统计成功率 / 覆盖率 / 碰撞率</text>
+  <text x="892" y="511" class="small">joint_evaluation_universal</text>
+
+  <path d="M1032 267 C1032 320, 287 320, 287 372" class="dash"/>
+  <path d="M430 447 H505" class="line"/>
+  <path d="M790 447 H865" class="line"/>
+
+  <rect x="145" y="610" width="1005" height="78" class="box"/>
+  <text x="175" y="642" class="box-title">验证工具链</text>
+  <text x="175" y="672" class="box-text">scene_3d_overview.png：场景总览    reach_debug_figs：LUT 稀疏度检查    lower_sac_demo.gif / rl_rollout.gif：控制与联合评估动画</text>
+  <path d="M1007 522 V610" class="dash"/>
+</svg>
