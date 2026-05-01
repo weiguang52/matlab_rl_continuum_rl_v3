@@ -86,8 +86,14 @@ function results = train_upper_dqn(scene, robot, reach, opts)
     fprintf('[Upper DQN v2] stateDim=%d maxActions=%d nAnchors=%d\n', ...
         stateDim, maxActions, nAnchors);
 
+    useGPU = resolve_use_gpu(opts.useGPU, 'Upper DQN');
+
     net_online = build_dqn(stateDim, maxActions, opts.hidden);
     net_target = net_online;
+    if useGPU
+        net_online = move_network_to_gpu(net_online);
+        net_target = move_network_to_gpu(net_target);
+    end
 
     buf = ReplayBuffer(BUF_CAP, stateDim);
     % 训练历史记录
@@ -121,7 +127,7 @@ function results = train_upper_dqn(scene, robot, reach, opts)
             if rand < eps
                 a = randi(nA);
             else
-                qvals = forward_net(net_online, obs);
+                qvals = forward_net(net_online, obs, useGPU);
                 qvals_valid = qvals(1:nA);
                 % 用 mask 避免选已使用过的 hole（可选：不屏蔽，让策略自己学）
                 if opts.mask_used_holes
@@ -180,7 +186,7 @@ function results = train_upper_dqn(scene, robot, reach, opts)
             if buf.size >= BATCH
                 % update_dqn 会返回更新后的 net_online；否则 MATLAB 函数内的局部更新不会回写到主循环
                 % 额外传入 scene，用于在 Double DQN target 中屏蔽不同层的 padding 无效动作
-                [net_online, loss] = update_dqn(net_online, net_target, buf, BATCH, LR, GAMMA, maxActions, scene);
+                [net_online, loss] = update_dqn(net_online, net_target, buf, BATCH, LR, GAMMA, maxActions, scene, useGPU);
                 loss_hist(end+1) = loss; %#ok<AGROW>
             end
 
@@ -210,6 +216,12 @@ function results = train_upper_dqn(scene, robot, reach, opts)
                 mean(holes_hist(max(1,ep-49):ep)), ...
                 mean(coverage_hist(max(1,ep-49):ep)));
         end
+    end
+
+    % 保存/评估默认使用 CPU 网络，避免后续在无 GPU 环境加载 mat 时受限。
+    if useGPU
+        net_online = move_network_to_cpu(net_online);
+        results_best = move_network_to_cpu(results_best);
     end
 
     results.net_online    = net_online;
@@ -246,27 +258,36 @@ function net = build_dqn(inDim, outDim, hidden)
     net = dlnetwork(layerGraph(layers));
 end
 
-function qvals = forward_net(net, obs)
-    x = dlarray(single(obs(:)), 'CB');
+function qvals = forward_net(net, obs, useGPU)
+    if nargin < 3, useGPU = false; end
+    xData = single(obs(:));
+    if useGPU, xData = gpuArray(xData); end
+    x = dlarray(xData, 'CB');
     y = predict(net, x);
-    qvals = double(extractdata(y));
+    qvals = double(to_cpu(extractdata(y)));
+end
+
+function qvals = forward_net_batch(net, obsBatch, useGPU)
+    if nargin < 3, useGPU = false; end
+    xData = single(obsBatch);
+    if useGPU, xData = gpuArray(xData); end
+    x = dlarray(xData, 'CB');
+    y = predict(net, x);
+    qvals = single(to_cpu(extractdata(y)));
 end
 
 % =========================================================
 %  Double DQN 更新（代价式：最小化 cost）
 % =========================================================
-function [net_online, loss] = update_dqn(net_online, net_target, buf, batch, lr, gamma, maxA, scene)
+function [net_online, loss] = update_dqn(net_online, net_target, buf, batch, lr, gamma, maxA, scene, useGPU)
     [s, a, r, s2, done] = buf.sample(batch);
 
     % 实际 batch 大小以采样结果为准，避免最后/异常情况下 batch 维度假设不一致
     actualBatch = size(s, 2);
 
-    q2_online = zeros(maxA, actualBatch, 'single');
-    q2_target = zeros(maxA, actualBatch, 'single');
+    q2_online = forward_net_batch(net_online, s2, useGPU);
+    q2_target = forward_net_batch(net_target, s2, useGPU);
     for i = 1:actualBatch
-        q2_online(:,i) = single(forward_net(net_online, s2(:,i)));
-        q2_target(:,i) = single(forward_net(net_target, s2(:,i)));
-
         % 不同层入口数量不同，但网络输出统一是 maxActions。
         % 因此下一状态 s2 中，超过该层真实入口数量的动作是 padding 无效动作，
         % Double DQN 选 next action 时必须屏蔽，否则 TD target 可能选到不存在的入口。
@@ -281,12 +302,18 @@ function [net_online, loss] = update_dqn(net_online, net_target, buf, batch, lr,
     td_targets  = single(r(:)') + single(gamma) * (1 - single(done(:)')) .* ...
                   q2_target(sub2ind(size(q2_target), best_a, 1:actualBatch));
 
-    X  = dlarray(single(s), 'CB');
-    td = dlarray(td_targets, 'CB');
+    XData = single(s);
+    tdData = td_targets;
+    if useGPU
+        XData = gpuArray(XData);
+        tdData = gpuArray(tdData);
+    end
+    X  = dlarray(XData, 'CB');
+    td = dlarray(tdData, 'CB');
     a_idx = a(:)';
 
     [grads, loss_val] = dlfeval(@(net) huber_loss_fn(net, X, a_idx, td, maxA), net_online);
-    loss = double(extractdata(loss_val));
+    loss = double(to_cpu(extractdata(loss_val)));
 
     % 注意：net_online 必须作为输出参数返回给主循环，否则这里的更新只停留在函数局部变量中
     net_online = dlupdate(@(p, g) p - lr * g, net_online, grads);
@@ -471,11 +498,75 @@ function opts = default_opts(opts)
 
     % --- 动作屏蔽 ---
     if ~isfield(opts,'mask_used_holes'),     opts.mask_used_holes     = true; end
+    if ~isfield(opts,'useGPU'),              opts.useGPU              = "auto"; end
 
     % --- 课程 ---
     if ~isfield(opts,'curriculum')
         opts.curriculum.phase1 = 400;    % 阶段0：LGP 小区域 + 少量目标
         opts.curriculum.phase2 = 1200;   % 阶段1：全层 + 中等目标数
+    end
+end
+
+function useGPU = resolve_use_gpu(requested, label)
+    if isstring(requested) || ischar(requested)
+        mode = lower(string(requested));
+        if mode == "auto"
+            useGPU = can_use_gpu();
+        elseif mode == "true" || mode == "on" || mode == "gpu"
+            useGPU = can_use_gpu();
+            if ~useGPU
+                warning('train_upper_dqn:useGPU', '%s 请求使用 GPU，但 MATLAB 未检测到可用 GPU，已回退 CPU。', label);
+            end
+        else
+            useGPU = false;
+        end
+    else
+        useGPU = logical(requested) && can_use_gpu();
+        if logical(requested) && ~useGPU
+            warning('train_upper_dqn:useGPU', '%s 请求使用 GPU，但 MATLAB 未检测到可用 GPU，已回退 CPU。', label);
+        end
+    end
+
+    if useGPU
+        g = gpuDevice();
+        fprintf('[%s] 使用 GPU 训练网络: %s\n', label, g.Name);
+    else
+        fprintf('[%s] 使用 CPU 训练网络。\n', label);
+    end
+end
+
+function ok = can_use_gpu()
+    ok = false;
+    try
+        if exist('canUseGPU', 'file') == 2 || exist('canUseGPU', 'builtin') == 5
+            ok = canUseGPU();
+            return;
+        end
+    catch
+    end
+    try
+        ok = gpuDeviceCount() > 0;
+    catch
+        try
+            gpuDevice();
+            ok = true;
+        catch
+            ok = false;
+        end
+    end
+end
+
+function net = move_network_to_gpu(net)
+    net = dlupdate(@gpuArray, net);
+end
+
+function net = move_network_to_cpu(net)
+    net = dlupdate(@gather, net);
+end
+
+function x = to_cpu(x)
+    if isa(x, 'gpuArray')
+        x = gather(x);
     end
 end
 

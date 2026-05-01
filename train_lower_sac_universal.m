@@ -47,9 +47,17 @@ function results = train_lower_sac_universal(scene, robot, reach, opts)
     TARGET_ENTROPY = -ACT_DIM;
 
     fprintf('[Universal SAC] 初始化共享下层 SAC 网络 obs=%d act=%d\n', OBS_DIM, ACT_DIM);
+    useGPU = resolve_use_gpu(opts.useGPU, 'Universal SAC');
 
     [actor, c1_online, c2_online, c1_target, c2_target] = ...
         build_sac_networks(OBS_DIM, ACT_DIM, opts.hidden);
+    if useGPU
+        actor = move_network_to_gpu(actor);
+        c1_online = move_network_to_gpu(c1_online);
+        c2_online = move_network_to_gpu(c2_online);
+        c1_target = move_network_to_gpu(c1_target);
+        c2_target = move_network_to_gpu(c2_target);
+    end
 
     log_alpha_val = 0.0;
 
@@ -84,7 +92,7 @@ function results = train_lower_sac_universal(scene, robot, reach, opts)
         ep_success = false;
 
         for step = 1:MAX_ST
-            action = actor_sample_action(actor, obs, act_low, act_high);
+            action = actor_sample_action(actor, obs, act_low, act_high, useGPU);
 
             q_raw = q + double(action);
             q_new = clamp_q(q_raw, q_low, q_high);
@@ -115,7 +123,7 @@ function results = train_lower_sac_universal(scene, robot, reach, opts)
                 [actor, c1_online, c2_online, c1_target, c2_target, ...
                  log_alpha_val, la, lc] = sac_update(actor, c1_online, c2_online, ...
                     c1_target, c2_target, log_alpha_val, buf, BATCH, ...
-                    LR_ACT, LR_CRI, LR_AL, GAMMA, TAU, TARGET_ENTROPY, act_low, act_high);
+                    LR_ACT, LR_CRI, LR_AL, GAMMA, TAU, TARGET_ENTROPY, act_low, act_high, useGPU);
 
                 loss_actor_hist(end+1)  = la; %#ok<AGROW>
                 loss_critic_hist(end+1) = lc; %#ok<AGROW>
@@ -135,6 +143,13 @@ function results = train_lower_sac_universal(scene, robot, reach, opts)
             fprintf('[Universal SAC] ep=%d phase=%d meanR=%.1f succRate=%.2f | layers=%s\n', ...
                 ep, phase, mean(reward_hist(win)), sr, mat2str(unique(layer_hist(win))'));
         end
+    end
+
+    % 保存/评估默认使用 CPU 网络，避免后续在无 GPU 环境加载 mat 时受限。
+    if useGPU
+        actor = move_network_to_cpu(actor);
+        c1_online = move_network_to_cpu(c1_online);
+        c2_online = move_network_to_cpu(c2_online);
     end
 
     results.actor        = actor;
@@ -293,9 +308,12 @@ end
 % =========================================================
 %  动作采样
 % =========================================================
-function action = actor_sample_action(actor, obs, act_low, act_high)
-    x = dlarray(single(obs(:)), 'CB');
-    out = double(extractdata(predict(actor, x)));
+function action = actor_sample_action(actor, obs, act_low, act_high, useGPU)
+    if nargin < 5, useGPU = false; end
+    xData = single(obs(:));
+    if useGPU, xData = gpuArray(xData); end
+    x = dlarray(xData, 'CB');
+    out = double(to_cpu(extractdata(predict(actor, x))));
     half = numel(out) / 2;
     mu = out(1:half);
     log_std = max(min(out(half+1:end), 2), -20);
@@ -310,7 +328,7 @@ end
 % =========================================================
 function [actor, c1, c2, c1t, c2t, log_alpha_val, la, lc] = sac_update( ...
         actor, c1, c2, c1t, c2t, log_alpha_val, buf, ...
-        batch, lr_a, lr_c, lr_al, gamma, tau, target_ent, act_low, act_high)
+        batch, lr_a, lr_c, lr_al, gamma, tau, target_ent, act_low, act_high, useGPU)
 
     [s_raw, a_raw, r_raw, s2_raw, done_raw] = buf.sample(batch);
     s    = single(s_raw);
@@ -323,8 +341,10 @@ function [actor, c1, c2, c1t, c2t, log_alpha_val, la, lc] = sac_update( ...
     next_act = zeros(numel(act_low), batch, 'single');
     next_lp  = zeros(1, batch, 'single');
     for i = 1:batch
-        x_i = dlarray(s2(:,i), 'CB');
-        out_i = double(extractdata(predict(actor, x_i)));
+        x_i_data = s2(:,i);
+        if useGPU, x_i_data = gpuArray(x_i_data); end
+        x_i = dlarray(x_i_data, 'CB');
+        out_i = double(to_cpu(extractdata(predict(actor, x_i))));
         half = numel(out_i)/2;
         mu_i = out_i(1:half);
         lst_i = max(min(out_i(half+1:end), 2), -20);
@@ -339,29 +359,49 @@ function [actor, c1, c2, c1t, c2t, log_alpha_val, la, lc] = sac_update( ...
         next_lp(i) = single(lp_i);
     end
 
-    sa2_dl = dlarray([s2; next_act], 'CB');
+    if useGPU
+        s_gpu = gpuArray(s);
+        a_gpu = gpuArray(a);
+        s2_gpu = gpuArray(s2);
+        next_act_gpu = gpuArray(next_act);
+        next_lp_gpu = gpuArray(next_lp);
+        r_gpu = gpuArray(r);
+        done_gpu = gpuArray(done);
+        alpha_gpu = gpuArray(alpha);
+    else
+        s_gpu = s;
+        a_gpu = a;
+        s2_gpu = s2;
+        next_act_gpu = next_act;
+        next_lp_gpu = next_lp;
+        r_gpu = r;
+        done_gpu = done;
+        alpha_gpu = alpha;
+    end
+
+    sa2_dl = dlarray([s2_gpu; next_act_gpu], 'CB');
     q1_tgt = extractdata(predict(c1t, sa2_dl));
     q2_tgt = extractdata(predict(c2t, sa2_dl));
     q_min_t = min(q1_tgt, q2_tgt);
-    td_target = r + gamma .* (1-done) .* (q_min_t - alpha .* next_lp);
+    td_target = r_gpu + gamma .* (1-done_gpu) .* (q_min_t - alpha_gpu .* next_lp_gpu);
     td_dl = dlarray(td_target, 'CB');
-    sa_dl = dlarray([s; a], 'CB');
+    sa_dl = dlarray([s_gpu; a_gpu], 'CB');
 
     [g1, lc1_val] = dlfeval(@critic_loss_fn, c1, sa_dl, td_dl);
-    lc1 = double(extractdata(lc1_val));
+    lc1 = double(to_cpu(extractdata(lc1_val)));
     c1 = sgd_update(c1, g1, lr_c);
 
     [g2, lc2_val] = dlfeval(@critic_loss_fn, c2, sa_dl, td_dl);
-    lc2 = double(extractdata(lc2_val));
+    lc2 = double(to_cpu(extractdata(lc2_val)));
     c2 = sgd_update(c2, g2, lr_c);
     lc = (lc1 + lc2)/2;
 
-    s_dl = dlarray(s, 'CB');
+    s_dl = dlarray(s_gpu, 'CB');
     [g_act, la_val] = dlfeval(@actor_loss_fn, actor, c1, c2, s_dl, alpha, act_low, act_high);
-    la = double(extractdata(la_val));
+    la = double(to_cpu(extractdata(la_val)));
     actor = sgd_update(actor, g_act, lr_a);
 
-    mean_lp = double(mean(next_lp));
+    mean_lp = double(to_cpu(mean(next_lp_gpu)));
     grad_log_alpha = -exp(log_alpha_val) * (mean_lp + double(target_ent));
     log_alpha_val = log_alpha_val - lr_al * grad_log_alpha;
 
@@ -381,10 +421,20 @@ function [grads, loss] = actor_loss_fn(actor, c1, c2, s_dl, alpha, act_low, act_
     mu = out(1:half,:);
     lst = max(min(out(half+1:end,:), 2), -20);
     std_ = exp(lst);
-    noise = dlarray(randn(size(extractdata(mu)), 'single'), 'CB');
+    noiseData = randn(size(extractdata(mu)), 'single');
+    isGPUData = isa(extractdata(mu), 'gpuArray');
+    if isGPUData
+        noiseData = gpuArray(noiseData);
+        alpha = gpuArray(alpha);
+    end
+    noise = dlarray(noiseData, 'CB');
     z = mu + std_ .* noise;
     sq = tanh(z);
 
+    if isGPUData
+        act_low = gpuArray(act_low);
+        act_high = gpuArray(act_high);
+    end
     al = dlarray(act_low, 'CB');
     ah = dlarray(act_high, 'CB');
     action = al + (ah - al) .* (sq + 1) / 2;
@@ -565,6 +615,70 @@ function opts = default_opts(opts)
     if ~isfield(opts,'obs_pos_scale'),       opts.obs_pos_scale = 1000; end
     if ~isfield(opts,'zprobe_norm_scale'),   opts.zprobe_norm_scale = 3000; end
     if ~isfield(opts,'radius_norm_scale'),   opts.radius_norm_scale = 500; end
+    if ~isfield(opts,'useGPU'),              opts.useGPU = "auto"; end
+end
+
+function useGPU = resolve_use_gpu(requested, label)
+    if isstring(requested) || ischar(requested)
+        mode = lower(string(requested));
+        if mode == "auto"
+            useGPU = can_use_gpu();
+        elseif mode == "true" || mode == "on" || mode == "gpu"
+            useGPU = can_use_gpu();
+            if ~useGPU
+                warning('train_lower_sac_universal:useGPU', '%s 请求使用 GPU，但 MATLAB 未检测到可用 GPU，已回退 CPU。', label);
+            end
+        else
+            useGPU = false;
+        end
+    else
+        useGPU = logical(requested) && can_use_gpu();
+        if logical(requested) && ~useGPU
+            warning('train_lower_sac_universal:useGPU', '%s 请求使用 GPU，但 MATLAB 未检测到可用 GPU，已回退 CPU。', label);
+        end
+    end
+
+    if useGPU
+        g = gpuDevice();
+        fprintf('[%s] 使用 GPU 训练网络: %s\n', label, g.Name);
+    else
+        fprintf('[%s] 使用 CPU 训练网络。\n', label);
+    end
+end
+
+function ok = can_use_gpu()
+    ok = false;
+    try
+        if exist('canUseGPU', 'file') == 2 || exist('canUseGPU', 'builtin') == 5
+            ok = canUseGPU();
+            return;
+        end
+    catch
+    end
+    try
+        ok = gpuDeviceCount() > 0;
+    catch
+        try
+            gpuDevice();
+            ok = true;
+        catch
+            ok = false;
+        end
+    end
+end
+
+function net = move_network_to_gpu(net)
+    net = dlupdate(@gpuArray, net);
+end
+
+function net = move_network_to_cpu(net)
+    net = dlupdate(@gather, net);
+end
+
+function x = to_cpu(x)
+    if isa(x, 'gpuArray')
+        x = gather(x);
+    end
 end
 
 function plot_lower_curves(reward_hist, success_hist, la_hist, lc_hist)

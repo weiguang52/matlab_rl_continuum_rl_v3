@@ -71,6 +71,7 @@ opts_upper.n_targets_min = 5;
 opts_upper.n_targets_max = 15;
 opts_upper.curriculum.phase1 = 400;
 opts_upper.curriculum.phase2 = 1200;
+opts_upper.useGPU = "auto";  % "auto": 有可用 GPU 时训练网络使用 GPU，否则回退 CPU
 % 奖励优先级（新定位点 ≫ 新下探孔）
 opts_upper.R_NEW_ANCHOR  = -15.0;
 opts_upper.R_NEW_HOLE    = -1.5;
@@ -99,6 +100,7 @@ opts_lower.k_reach      = 8.0;    % 原 5，加强势差引导
 opts_lower.lr_actor     = 5e-4;
 opts_lower.lr_critic    = 5e-4;
 opts_lower.lr_alpha     = 1e-4;
+opts_lower.useGPU       = "auto";  % "auto": 有可用 GPU 时训练网络使用 GPU，否则回退 CPU
 % 通用 SAC 每个 episode 会随机层、随机入口、随机目标。
 % 动作是每一步的 Δq，建议比旧版更小，便于连续控制稳定学习。
 opts_lower.act_low      = [-8; -0.35; -0.25; -0.35; -0.25; -0.35];
