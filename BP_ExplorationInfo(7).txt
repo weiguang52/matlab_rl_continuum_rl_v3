@@ -1,0 +1,9 @@
+AnchorPoint	ExplorationNum	ExplorationType
+8F	8H-1	RobotArm
+8F	8H-2	RobotArm
+8F	8H-3	Camera
+8F	8H-4	Camera
+8K	8H-1	Camera
+8K	8H-2	Camera
+8K	8H-3	RobotArm
+8K	8H-4	RobotArm
